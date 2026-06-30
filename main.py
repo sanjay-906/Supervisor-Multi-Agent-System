@@ -1,8 +1,10 @@
 import json
+import traceback
 import uuid
+import pickle
+from pathlib import Path
 from datetime import datetime
 from typing import AsyncGenerator, Optional
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -11,6 +13,12 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agentics import supervisor
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
+
+
+langfuse = get_client()
+langfuse_handler = CallbackHandler()
 
 
 class ChatRequest(BaseModel):
@@ -24,6 +32,19 @@ class ChatSession(BaseModel):
 
 
 sessions: dict[str, list] = {}
+
+STATE_DIR = Path("./state_snapshots")
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_state_snapshot(thread_id: str, state_snapshot) -> None:
+    """Pickle the full LangGraph state snapshot for a thread, overwriting the previous save."""
+    path = STATE_DIR / f"{thread_id}.pkl"
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(state_snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"[state_snapshot] failed to save state for thread {thread_id}: {e}", flush=True)
 
 
 def sse(event: str, data: dict) -> str:
@@ -285,7 +306,8 @@ async def chat_stream(req: ChatRequest):
         "configurable": {
             "thread_id": thread_id,
             "user_id": req.user_id,
-        }
+        },
+        "callbacks": [langfuse_handler]
     }
 
     async def event_stream():
@@ -297,7 +319,9 @@ async def chat_stream(req: ChatRequest):
         try:
             new_state = await graph.aget_state(config)
             sessions[thread_id]["messages"] = new_state.values.get("messages", session["messages"])
+            save_state_snapshot(thread_id, new_state)
         except Exception:
+            traceback.print_exc()
             pass
 
     return StreamingResponse(

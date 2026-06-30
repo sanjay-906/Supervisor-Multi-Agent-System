@@ -1,19 +1,35 @@
 from langchain.agents import create_agent
-from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
 import requests
 from tavily import TavilyClient
 from langgraph_supervisor import create_supervisor
 from datetime import datetime
+from html_render_tools import (
+    render_itinerary_html,
+    render_hotel_options_html,
+    render_flight_options_html,
+    render_generic_html,
+    ITINERARY_HTML_ADDENDUM,
+    HOTEL_HTML_ADDENDUM,
+    FLIGHT_HTML_ADDENDUM,
+    SUPERVISOR_HTML_ADDENDUM
+)
 
+from api_keys import WEATHER_API_KEY, TAVILY_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY  # noqa: F401
+from dotenv import load_dotenv
 
-WEATHER_API_KEY = "xyz"
-TAVILY_API_KEY = "xyz"
-GOOGLE_API_KEY = "xyz"
-
+load_dotenv()
 
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", google_api_key=GOOGLE_API_KEY)
+# llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", google_api_key=GOOGLE_API_KEY)
+llm = ChatOpenAI(
+    model="gpt-5.5",
+    api_key=OPENAI_API_KEY,
+    # model_kwargs={"prompt_cache_key": "default-cache-v1"}
+)
 
 supervisor_agent_system_prompt = """You are a Supervisor Agent for a multi-agent travel planning system. Your role is to coordinate specialized sub-agents and shared tools to produce accurate, end-to-end travel plans.
 
@@ -64,6 +80,8 @@ You may directly use these when needed for supporting context:
    - Activities / schedules → Itinerary Agent
 3. Enrich with shared tools if needed (weather, events, time context)
 4. Combine results into a structured, user-ready response
+
+NOTE: First gather ALL the information from the user for a trip planning and then call the agents one by one.. dont call the agents without complete information. If the user has not provided all the necessary information, ask for it first before delegating to any agent.
 
 ## Output Style
 
@@ -172,6 +190,9 @@ Morning / Afternoon / Evening with activities + meals
 - Never assume travel times—use tool results.
 - Ask clarifying questions if destination, dates, or interests are missing.
 - Keep recommendations personalized and practical.
+
+NOTE: if the user asks about hotels or flights, do not answer, that will be taken care by other agents. Only answer about itinerary related queries.
+
 """
 
 hotel_agent_system_prompt = """You are a Hotel Search and Recommendation Agent.
@@ -245,9 +266,12 @@ For each hotel:
 - If data is insufficient, explicitly state uncertainty.
 - Do not ask excessive follow-up questions—proceed with best available assumptions.
 - Keep responses concise, structured, and comparison-driven.
+
+NOTE: if the user asks about flights or itinerary, do not answer, that will be taken care by other agents. Only answer about hotesls and hotel related queries.
+
 """
 
-flight_agent_system_prompt = """You are a Flight Search and Recommendation Agent.
+flight_agent_system_prompt = """You are a Flight Search and Flight Recommendation Agent.
 
 Your job is to help users find the best flights, compare options, optimize routes, and check flight status. You assist with end-to-end flight planning focused on price, duration, convenience, and reliability.
 
@@ -323,6 +347,8 @@ For each flight:
 - Do not ask too many follow-up questions
 - Use uncertainty instead of guessing missing data
 - Keep responses structured and comparison-driven
+
+NOTE: if the user asks about hotels or itinerary, do not answer, that will be taken care by other agents. Only answer about flights and flight related queries.
 """
 
 
@@ -351,9 +377,7 @@ def get_current_weather(location: str) -> dict:
     response.raise_for_status()
 
     data = response.json()
-    print("-------------------------")
-    print(data)
-    print("-------------------------")
+
     return {
         "location": data["location"]["name"],
         "region": data["location"]["region"],
@@ -379,6 +403,8 @@ def generic_web_search(query: str) -> dict:
 
     Returns:
         Structured JSON containing search results
+
+    NOTE: Keep your query concise—under 400 characters. Exceeding this will cause errors. For longer queries, split into multiple searches. Use this tool only when necessary for information not covered by other agents.
     """
 
     response = tavily_client.search(
@@ -436,6 +462,11 @@ def discover_attractions(destination: str) -> str:
     {destination}. Include opening hours and traveler recommendations if available.
     """
 
+    if len(query) >= 400:
+        query = f"""
+        Discover attractions in {destination}
+        """
+
     response = tavily_client.search(
         query=query,
         search_depth="advanced",
@@ -473,6 +504,11 @@ def estimate_travel_logistics(route: str) -> str:
     {route}
     """
 
+    if len(query) >= 400:
+        query = f"""
+        Estimate travel logistics for {route}
+        """
+
     response = tavily_client.search(
         query=query,
         search_depth="advanced",
@@ -509,6 +545,11 @@ def find_local_events(destination_and_dates: str) -> str:
     cultural activities, seasonal attractions, and special happenings in
     {destination_and_dates}
     """
+
+    if len(query) >= 400:
+        query = f"""
+        Find upcoming local events: {destination_and_dates}
+        """
 
     response = tavily_client.search(
         query=query,
@@ -548,6 +589,11 @@ def search_hotels(destination_and_dates: str) -> str:
     availability indicators, and key amenities such as WiFi, breakfast, pool, and parking.
     Return top-rated and best value options for travelers.
     """
+
+    if len(query) >= 400:
+        query = f"""
+        Find hotels: {destination_and_dates}
+        """
 
     response = tavily_client.search(
         query=query,
@@ -589,6 +635,11 @@ def get_hotel_ratings_and_reviews(hotel_name_and_location: str) -> str:
     highlights, and expert recommendations if available.
     """
 
+    if len(query) >= 400:
+        query = f"""
+        Get hotel reviews and ratings: {hotel_name_and_location}
+        """
+
     response = tavily_client.search(
         query=query,
         search_depth="advanced",
@@ -627,6 +678,11 @@ def search_flights(route_and_dates: str) -> str:
     and cheapest vs fastest options.
     Focus on up-to-date flight availability and fare estimates.
     """
+
+    if len(query) >= 400:
+        query = f"""
+        Flight options for {route_and_dates}
+        """
 
     response = tavily_client.search(
         query=query,
@@ -667,6 +723,11 @@ def analyze_flight_routes(route: str) -> str:
     Also include major airline hubs used on this route.
     """
 
+    if len(query) >= 400:
+        query = f"""
+        Analyze flight routes for {route}
+        """
+
     response = tavily_client.search(
         query=query,
         search_depth="advanced",
@@ -705,6 +766,11 @@ def get_flight_status(flight_details: str) -> str:
     and any disruption alerts or schedule changes.
     """
 
+    if len(query) >= 400:
+        query = f"""
+        Live flight status for {flight_details}
+        """
+
     response = tavily_client.search(
         query=query,
         search_depth="advanced",
@@ -725,33 +791,58 @@ def get_flight_status(flight_details: str) -> str:
     }
 
 
+itinerary_agent_system_prompt += "\n" + ITINERARY_HTML_ADDENDUM
+hotel_agent_system_prompt += "\n" + HOTEL_HTML_ADDENDUM
+flight_agent_system_prompt += "\n" + FLIGHT_HTML_ADDENDUM
+supervisor_agent_system_prompt += "\n" + SUPERVISOR_HTML_ADDENDUM
+
+
 itinerary_agent = create_agent(
     model=llm,
-    tools=[discover_attractions, estimate_travel_logistics, find_local_events],
+    tools=[
+        discover_attractions,
+        estimate_travel_logistics,
+        find_local_events,
+        render_itinerary_html
+    ],
     system_prompt=itinerary_agent_system_prompt,
     name="itinerary_agent"
 )
 
 hotel_agent = create_agent(
     model=llm,
-    tools=[search_hotels, get_hotel_ratings_and_reviews],
+    tools=[
+        search_hotels,
+        get_hotel_ratings_and_reviews,
+        render_hotel_options_html
+    ],
     system_prompt=hotel_agent_system_prompt,
     name="hotel_agent"
 )
 
 flight_agent = create_agent(
     model=llm,
-    tools=[search_flights, analyze_flight_routes, get_flight_status],
+    tools=[
+        search_flights,
+        analyze_flight_routes,
+        get_flight_status,
+        render_flight_options_html
+    ],
     system_prompt=flight_agent_system_prompt,
     name="flight_agent"
 )
 
 supervisor = create_supervisor(
     agents=[flight_agent, hotel_agent, itinerary_agent],
-    tools=[generic_web_search, get_current_weather, current_timestamp],
+    tools=[
+        generic_web_search,
+        get_current_weather,
+        current_timestamp,
+        render_generic_html
+    ],
     model=llm,
     prompt=supervisor_agent_system_prompt,
     output_mode="last_message"
-).compile()
+).compile(checkpointer=InMemorySaver())
 
 # display(Image(supervisor.get_graph(xray=1).draw_mermaid_png()))
