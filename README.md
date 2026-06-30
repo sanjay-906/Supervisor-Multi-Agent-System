@@ -2,7 +2,12 @@
 for travel planning
 
 
-# Demo
+# Demo v2
+
+https://github.com/user-attachments/assets/ddd10cc1-acc9-4d5e-9ec1-ff1cfff397f9
+
+# Demo v1
+
 https://github.com/user-attachments/assets/1f360e33-dc81-4738-9878-364bac30b20d
 
 # Architecture
